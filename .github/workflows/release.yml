@@ -1,10 +1,16 @@
 name: release
 
-# 多平台构建：产出 Windows / macOS / FreeBSD / Linux 的单文件二进制。
+# 多系统二进制构建。
 #
-# 说明：CNB（cnb.cool）只能跑 Linux 容器，无法产出 macOS 与 FreeBSD 二进制，
-# 因此这份工作流面向 GitHub（若仓库仅托管在 CNB，可忽略本文件）。
-# 需要 macOS 二进制时必须在 macOS runner 上构建：交叉编译需要 Apple SDK。
+# 为什么需要这份工作流：CNB 只能运行 Linux 容器，无法产出 macOS 二进制
+# （交叉编译需要 Apple SDK），FreeBSD 也需要自建 sysroot。因此分工是：
+#   - CNB（.cnb.yml）：Linux amd64/arm64 + Windows amd64（mingw 交叉编译）
+#   - 本工作流：macOS（Intel + Apple Silicon）+ FreeBSD，并在最后把产物
+#     发布到**同一个 CNB Release**，让多系统产物集中在一处
+#
+# 需要的仓库 Secret：
+#   CNB_TOKEN  具备 repo-release:rw 权限的 CNB 令牌
+# 未配置时发布步骤自动跳过，构建本身照常完成。
 
 on:
   push:
@@ -13,92 +19,54 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  build:
-    name: ${{ matrix.name }}
+  # ---------------------------------------------------------------
+  # macOS：必须在 macOS runner 上构建
+  # ---------------------------------------------------------------
+  macos:
+    name: macos-${{ matrix.arch }}
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - name: linux-amd64
-            runner: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-          - name: linux-arm64
-            runner: ubuntu-latest
-            target: aarch64-unknown-linux-musl
-            cross: true
-          - name: windows-amd64
-            runner: windows-latest
-            target: x86_64-pc-windows-msvc
-          - name: macos-amd64
+          - arch: amd64
             runner: macos-13
             target: x86_64-apple-darwin
-          - name: macos-arm64
+          - arch: arm64
             runner: macos-14
             target: aarch64-apple-darwin
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
 
-      # musl 目标需要 musl 链接器（仅 amd64 走本机即可）
-      - name: 安装 musl 工具链
-        if: matrix.target == 'x86_64-unknown-linux-musl'
-        run: sudo apt-get update && sudo apt-get install -y musl-tools
-
-      # arm64 musl 交叉编译用 cross（自带 sysroot 与链接器）
-      - name: 安装 cross
-        if: matrix.cross
-        uses: taiki-e/install-action@cross
-
       - name: 构建
-        shell: bash
-        run: |
-          if [ "${{ matrix.cross }}" = "true" ]; then
-            cross build --release --locked --target ${{ matrix.target }}
-          else
-            cargo build --release --locked --target ${{ matrix.target }}
-          fi
+        run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: 打包
-        shell: bash
+      - name: 验证可运行
         run: |
-          set -e
-          bin="cloudkeep"
-          [ "${{ runner.os }}" = "Windows" ] && bin="cloudkeep.exe"
+          ./target/${{ matrix.target }}/release/cloudkeep --version
+          ./target/${{ matrix.target }}/release/cloudkeep help > /dev/null
+
+      - name: 整理产物
+        run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release/$bin" "dist/"
-          cd dist
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            7z a "../cloudkeep-${{ matrix.name }}.zip" "$bin"
-          else
-            tar czf "../cloudkeep-${{ matrix.name }}.tar.gz" "$bin"
-          fi
-          cd ..
-          ls -lh cloudkeep-${{ matrix.name }}.*
-
-      - name: 验证二进制可运行
-        shell: bash
-        run: |
-          set -e
-          bin="dist/cloudkeep"
-          [ "${{ runner.os }}" = "Windows" ] && bin="dist/cloudkeep.exe"
-          "$bin" --version
-          "$bin" help > /dev/null
+          cp target/${{ matrix.target }}/release/cloudkeep \
+             dist/cloudkeep-macos-${{ matrix.arch }}
 
       - uses: actions/upload-artifact@v4
         with:
-          name: cloudkeep-${{ matrix.name }}
-          path: cloudkeep-${{ matrix.name }}.*
+          name: cloudkeep-macos-${{ matrix.arch }}
+          path: dist/cloudkeep-macos-${{ matrix.arch }}
           if-no-files-found: error
 
-  # FreeBSD 没有官方 hosted runner，用虚拟机跑
+  # ---------------------------------------------------------------
+  # FreeBSD：没有官方 hosted runner，用虚拟机
+  # ---------------------------------------------------------------
   freebsd:
     name: freebsd-amd64
     runs-on: ubuntu-latest
@@ -118,11 +86,43 @@ jobs:
             cargo build --release --locked
             ./target/release/cloudkeep --version
             ./target/release/cloudkeep help > /dev/null
-            mkdir -p dist && cp target/release/cloudkeep dist/
-            tar czf cloudkeep-freebsd-amd64.tar.gz -C dist cloudkeep
+            mkdir -p dist
+            cp target/release/cloudkeep dist/cloudkeep-freebsd-amd64
 
       - uses: actions/upload-artifact@v4
         with:
           name: cloudkeep-freebsd-amd64
-          path: cloudkeep-freebsd-amd64.tar.gz
+          path: dist/cloudkeep-freebsd-amd64
           if-no-files-found: error
+
+  # ---------------------------------------------------------------
+  # 汇总并发布到 CNB Release，与 CNB 自己产出的 Linux / Windows 合并到同一版本
+  # ---------------------------------------------------------------
+  publish:
+    name: publish-to-cnb-release
+    runs-on: ubuntu-latest
+    needs: [macos, freebsd]
+    if: always() && needs.macos.result != 'cancelled' && needs.freebsd.result != 'cancelled'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: 列出待发布产物
+        run: ls -lh dist/
+
+      - name: 发布到 CNB Release
+        env:
+          TOKEN: ${{ secrets.CNB_TOKEN }}
+          CNB_REPO: Emptyfox-Network/CloudKeep
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          set -e
+          if [ -z "$TOKEN" ]; then
+            echo "未配置 CNB_TOKEN，跳过发布（产物仍可从本工作流 Artifacts 下载）"
+            exit 0
+          fi
+          sh scripts/publish-release.sh dist

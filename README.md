@@ -24,12 +24,19 @@
 
 程序是纯 Rust 实现，除标准库与纯 Rust 依赖外不需要任何系统组件，因此在 Rust 支持的平台上都能编译运行。
 
-| 平台 | 架构 | 产物 | 常驻方式 |
-| --- | --- | --- | --- |
-| Linux | amd64 / arm64 | `cloudkeep`（musl 静态） | systemd / Docker |
-| Windows | amd64 | `cloudkeep.exe` | 计划任务（见下） |
-| macOS | amd64 / arm64 | `cloudkeep` | launchd |
-| FreeBSD | amd64 | `cloudkeep` | rc.d |
+| 平台 | 架构 | 产物 | 云端构建 | 常驻方式 |
+| --- | --- | --- | --- | --- |
+| Linux | amd64 / arm64 | `cloudkeep`（musl 静态） | **CNB** | systemd / Docker |
+| Windows | amd64 | `cloudkeep.exe` | **CNB**（mingw 交叉编译） | 计划任务（见下） |
+| macOS | amd64 / arm64 | `cloudkeep` | GitHub（需 macOS runner） | launchd |
+| FreeBSD | amd64 | `cloudkeep` | GitHub（FreeBSD 虚拟机） | rc.d |
+
+云端构建的分工不是随意选的，而是由平台能力决定的：
+
+- **CNB 只能运行 Linux 容器**，因此 macOS 无法在其上产出 —— 交叉编译 macOS 需要 Apple SDK，任何 Linux 工具链都做不到
+- **Windows 可以**：Alpine 提供 `mingw-w64-gcc`，用 `x86_64-pc-windows-gnu` 交叉编译即可
+- **FreeBSD 需要自建 sysroot**，不适合塞进主流水线，放到 GitHub 的 FreeBSD 虚拟机里原生编译
+- 三条链路最终都调用同一个 [scripts/publish-release.sh](scripts/publish-release.sh)，把产物发布到**同一个 CNB Release**，所以用户在一个页面就能拿到全部系统的二进制
 
 已针对跨平台做的适配（都有回归测试）：
 
@@ -343,18 +350,25 @@ docker compose run --rm -e BACKUP_REMOTE_DIR=/backup/mysql cloudkeep ensure-dir
    docker.cnb.cool/emptyfox-network/cloudkeep:latest
    ```
 2. **导出各架构单文件二进制**：直接从刚推送的镜像中取出 `/usr/local/bin/cloudkeep`，不再重复编译（否则要多花一轮 QEMU 编译）。
-3. **验证产物**：在干净的 `alpine` 容器里运行该二进制，确认它确实自包含、无需任何运行时。
-4. **发布到 Release**：把二进制作为版本附件上传，供裸机直接下载（见下）。
+3. **交叉编译 Windows 二进制**：在 `rust:1-alpine` 容器里装 `mingw-w64-gcc`，以 `x86_64-pc-windows-gnu` 目标编译出 `.exe`。这一步做成失败不致命 —— 环境变动时只会少一个产物，不会拖垮镜像。
+4. **验证产物**：在干净的 `alpine` 容器里运行该二进制，确认它确实自包含、无需任何运行时。
+5. **发布到 Release**：把全部二进制作为版本附件上传，供裸机直接下载（见下）。
+
+macOS 与 FreeBSD 由 [.github/workflows/release.yml](.github/workflows/release.yml) 构建（CNB 无法产出），构建完同样调用发布脚本推送到**同一个 CNB Release**。
 
 ### 下载二进制
 
 **方式一：从 Release 下载**（推荐）
 
-在仓库的 Releases 页面下载对应架构的附件：
+在仓库的 Releases 页面下载对应系统的附件：
 
 ```
-cloudkeep-linux-amd64      # x86_64，musl 静态链接
-cloudkeep-linux-arm64      # aarch64，musl 静态链接
+cloudkeep-linux-amd64        # Linux x86_64，musl 静态链接
+cloudkeep-linux-arm64        # Linux aarch64，musl 静态链接
+cloudkeep-windows-amd64.exe  # Windows x86_64（CNB 交叉编译）
+cloudkeep-macos-amd64        # macOS Intel（GitHub 构建）
+cloudkeep-macos-arm64        # macOS Apple Silicon（GitHub 构建）
+cloudkeep-freebsd-amd64      # FreeBSD x86_64（GitHub 构建）
 ```
 
 ```bash
@@ -362,12 +376,19 @@ chmod +x cloudkeep-linux-amd64
 ./cloudkeep-linux-amd64 --version
 ```
 
-> **首次使用需要在仓库环境变量里设置 `RELEASE_TOKEN`**：发布 Release 需要 `repo-release:rw` 权限的令牌，只有 Git 权限的令牌会返回
-> `errcode 10023 / Missing required scopes: repo-release:rw`。
-> 未配置该变量时发布步骤会打印告警并跳过，**不影响镜像构建**。
+> **发布 Release 需要令牌权限：`repo-release:rw`**
+>
+> 在仓库环境变量里设置 `RELEASE_TOKEN`（值为具备该权限的 CNB 访问令牌）。
+> 只有 Git 权限的令牌会返回：
+> ```
+> errcode 10023  Missing required scopes: repo-release:rw
+> ```
+> 未配置该变量时，发布步骤会打印告警并**跳过**，不会影响镜像构建与其它步骤。
+> 需要执行的操作：到 CNB 新建访问令牌时勾选 Release 的读写权限，再把它设为仓库的 `RELEASE_TOKEN`。
+>
 > 也可以用 [scripts/publish-release.sh](scripts/publish-release.sh) 在本地手动发布：
 > ```bash
-> TOKEN=<令牌> ./scripts/publish-release.sh dist
+> TOKEN=<具备 repo-release:rw 的令牌> ./scripts/publish-release.sh dist
 > ```
 
 **方式二：从镜像里取出**（无需任何令牌，随时可用）

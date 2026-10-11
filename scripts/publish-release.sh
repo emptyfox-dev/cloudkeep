@@ -39,26 +39,35 @@ VERSION="$(sed -n 's/^version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' Cargo.
 TAG="${TAG:-v${VERSION:-0.0.0}}"
 TARGET_SHA="${TARGET_SHA:-$(git rev-parse HEAD 2>/dev/null || echo '')}"
 
-# JSON 取值：优先 python3，其次 jq，最后退回 sed（只适用于扁平 JSON）
-# 注意先确认 python3 真的可用：Windows 上的应用商店别名会存在但不可执行
-if command -v python3 >/dev/null 2>&1 && python3 -c 'pass' >/dev/null 2>&1; then
-    JSON_TOOL=python3
+# JSON 取值：优先 python3/python，其次 jq，最后退回 sed（只适用于扁平 JSON）
+# 要先确认解释器真的可用：Windows 上的应用商店别名存在但不可执行；
+# 另外部分系统只有 python 而没有 python3。
+PY=""
+for cand in python3 python; do
+    if command -v "$cand" >/dev/null 2>&1 && "$cand" -c 'pass' >/dev/null 2>&1; then
+        PY="$cand"
+        break
+    fi
+done
+
+if [ -n "$PY" ]; then
+    JSON_TOOL=python
 elif command -v jq >/dev/null 2>&1; then
     JSON_TOOL=jq
 else
     JSON_TOOL=sed
 fi
-echo "[release] JSON 解析方式: $JSON_TOOL"
+echo "[release] JSON 解析方式: $JSON_TOOL${PY:+ ($PY)}"
 if [ "$JSON_TOOL" = "sed" ]; then
-    echo "[release] 警告：未找到 python3/jq，改用 sed 做尽力解析；"
-    echo "[release]       服务端返回字段顺序变化时可能取错值，建议安装 jq 或 python3"
+    echo "[release] 警告：未找到可用的 python/jq，改用 sed 做尽力解析；"
+    echo "[release]       服务端返回字段顺序变化时可能取错值，建议安装 jq 或 python"
 fi
 
 json_get() {
     key="$1"
     case "$JSON_TOOL" in
-        python3)
-            python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get(sys.argv[1]) or "")' "$key" 2>/dev/null
+        python)
+            "$PY" -c 'import json,sys;d=json.load(sys.stdin);print(d.get(sys.argv[1]) or "")' "$key" 2>/dev/null
             ;;
         jq)
             jq -r --arg k "$key" '.[$k] // empty' 2>/dev/null

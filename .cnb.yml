@@ -69,13 +69,37 @@ main:
             extract linux/amd64  cloudkeep-linux-amd64
             extract linux/arm64  cloudkeep-linux-arm64
 
+        # Windows 无法在 Linux 容器里原生编译，改用 Alpine 提供的 mingw-w64 交叉工具链。
+        # 做成「失败不致命」：CNB 只能跑 Linux，交叉编译若环境有变也不该拖垮镜像与 Release。
+        - name: 交叉编译 Windows 二进制
+          script: |
+            set +e
+            docker run --rm -v "$PWD:/w" -w /w rust:1-alpine sh -eu -c '
+              apk add --no-cache build-base mingw-w64-gcc >/dev/null 2>&1
+              rustup target add x86_64-pc-windows-gnu >/dev/null 2>&1
+              export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+              cargo build --release --locked --target x86_64-pc-windows-gnu
+              cp target/x86_64-pc-windows-gnu/release/cloudkeep.exe \
+                 dist/cloudkeep-windows-amd64.exe
+            '
+            if [ $? -ne 0 ]; then
+              echo "!! Windows 交叉编译失败，本次不产出该产物（不影响镜像与其它产物）"
+            else
+              echo "==> Windows 产物已生成"
+            fi
+            chmod -R a+r dist 2>/dev/null || true
+            ls -lh dist/ || true
+            exit 0
+
         - name: 校验产物
           script: |
             set -e
             find dist -type f -print -exec ls -lh {} \;
-            count=$(find dist -type f | wc -l)
+            count=$(find dist -type f -name 'cloudkeep-*' | wc -l)
             echo "产物数量: $count"
-            test "$count" -ge 2
+            # 至少要拿到两个 Linux 架构；Windows 为尽力产出
+            test -f dist/cloudkeep-linux-amd64
+            test -f dist/cloudkeep-linux-arm64
 
         # 在干净的 alpine 里直接运行产物，证明它是自包含的静态二进制
         - name: 验证可脱离构建环境运行
