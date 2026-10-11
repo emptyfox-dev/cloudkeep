@@ -1,10 +1,34 @@
 main:
   push:
-    # 一次构建完成两件事：推送多架构镜像 + 导出各架构单文件二进制
+    # 一次构建完成三件事：推送多架构镜像 + 导出各架构单文件二进制 + 发 Release
     # 平台原生支持 buildx 多架构（QEMU 已内置，无需 binfmt 配置）
+    #
+    # ⚠️ 关于 timeout / heartbeat / 2>&1（勿删，曾因此构建失败）：
+    # CNB 的「无输出超时」默认只有 10 分钟。实测失败日志：
+    #     Finished, code: -1, duration: 10m 10s
+    #     任务超过(10m0s)没有任何输出而被强制关闭
+    # 根因：**cargo 把编译进度全部写到 stderr**（本机实测 stdout 0 字节 /
+    # stderr 151 字节）。平台统计的是 stdout（日志里那串 docker pull 进度条
+    # 正说明这一点），于是 cargo 的长时间编译被视为"无输出"而被强杀。
+    #
+    # 三条对策缺一不可：
+    #   1. cargo 命令统一加 `2>&1` —— 把进度并到 stdout，真正被平台看见；
+    #   2. 声明 timeout —— 官方文档明确"声明 timeout 后，无输出超时与最大
+    #      执行时间都按该值执行"，这是覆盖 10 分钟阈值的正式手段；
+    #   3. heartbeat —— 每 20 秒 echo 一行，作为兜底持续喂看门狗。
     - name: build-and-publish
       services:
+        # docker 服务提供 dind + docker cli，供登录制品库与 buildx 推送使用
         - docker
+      # 流水线直接跑在 rust 镜像里，不再用 `docker run` 包一层：
+      # 少一层嵌套就少一层输出缓冲，且能用 docker.volumes 原生缓存依赖。
+      docker:
+        image: rust:1-alpine
+        volumes:
+          # 官方 rust 镜像的 CARGO_HOME 是 /usr/local/cargo（步骤里会打印确认）。
+          # 缓存 registry 子目录：跨流水线复用已下载的索引与依赖，
+          # 免去每次 push 全量重下 crates.io。（即 Agent/09 记录的"无 cargo 缓存"）
+          - /usr/local/cargo/registry:copy-on-write
       env:
         IMAGE: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}
         # 仅保留 Rust 官方镜像确实提供工具链的架构：
@@ -14,33 +38,48 @@ main:
         # 需要 armv7 时得改用其它基础镜像，不能用同一个 buildx 构建同时覆盖。
         PLATFORMS: linux/amd64,linux/arm64
       stages:
-        - name: 登录制品库
-          script: docker login -u ${CNB_TOKEN_USER_NAME} -p "${CNB_TOKEN}" ${CNB_DOCKER_REGISTRY}
+        # 安装本流水线用到的工具（每个步骤自带，不依赖跨步骤环境残留）：
+        #   build-base/perl —— ring（rustls 加密后端）编译所需
+        #   curl/jq         —— 发布 Release 的脚本需要
+        - name: 准备构建环境
+          script: |
+            set -eu
+            echo "==> CARGO_HOME=${CARGO_HOME:-<未设置>}"
+            apk add --no-cache build-base perl curl jq
 
         # 先跑测试与静态检查：镜像是要分发的制品，测试不过就不该产出
         - name: 单元测试
+          timeout: 45m
           script: |
-            set -e
-            docker run --rm -v "$PWD:/w" -w /w rust:1-alpine sh -eu -c '
-              apk add --no-cache build-base perl >/dev/null 2>&1
-              cargo test --locked
-            '
+            set -eu
+            ( while :; do sleep 20; echo "[heartbeat] cargo test 进行中..."; done ) &
+            HB=$!
+            trap 'kill $HB 2>/dev/null || true' EXIT
+
+            apk add --no-cache build-base perl
+            cargo test --locked 2>&1
 
         - name: 静态检查
+          timeout: 45m
           script: |
-            set -e
-            docker run --rm -v "$PWD:/w" -w /w rust:1-alpine sh -eu -c '
-              apk add --no-cache build-base perl >/dev/null 2>&1
-              rustup component add clippy >/dev/null 2>&1
-              cargo clippy --all-targets --locked -- -D warnings
-            '
+            set -eu
+            ( while :; do sleep 20; echo "[heartbeat] cargo clippy 进行中..."; done ) &
+            HB=$!
+            trap 'kill $HB 2>/dev/null || true' EXIT
+
+            apk add --no-cache build-base perl
+            rustup component add clippy
+            cargo clippy --all-targets --locked -- -D warnings 2>&1
+
+        - name: 登录制品库
+          script: docker login -u ${CNB_TOKEN_USER_NAME} -p "${CNB_TOKEN}" ${CNB_DOCKER_REGISTRY}
 
         # 把基础镜像支持的平台打进日志：
         # 一旦出现 "no match for platform in manifest"，可直接对照这里确认
         # 到底是哪个架构不被支持，不必反复试错
         - name: 诊断基础镜像平台
           script: |
-            set -e
+            set -eu
             for img in rust:1-alpine alpine:3.21; do
               echo "===== $img ====="
               docker buildx imagetools inspect "$img" 2>&1 | sed -n '1,40p' || true
@@ -49,8 +88,22 @@ main:
             docker buildx ls || true
 
         - name: 多架构构建并推送
+          timeout: 90m
           script: |
-            set -e
+            set -eu
+            # 多架构构建要跑两轮 QEMU 全量编译（release 档还开 LTO），
+            # 是整条流水线最慢的一步，心跳必不可少。
+            ( while :; do sleep 20; echo "[heartbeat] buildx 多架构构建进行中..."; done ) &
+            HB=$!
+            trap 'kill $HB 2>/dev/null || true' EXIT
+
+            # 兜底：确保 buildx 可用（平台通常已注入，缺失时从 alpine 装）
+            if ! docker buildx version >/dev/null 2>&1; then
+              echo "==> 未检测到 buildx，安装 docker-cli-buildx"
+              apk add --no-cache docker-cli-buildx
+            fi
+            docker buildx version
+
             # 首次构建时 ${IMAGE}:latest 并不存在；部分 buildx 版本在
             # --cache-from 指向不存在的镜像时会直接报错，形成
             # 「镜像不存在 -> 构建失败 -> 镜像永远不会存在」的死锁。
@@ -63,18 +116,22 @@ main:
               echo "==> 首次构建，跳过 cache-from"
             fi
 
+            # --progress=plain：非 TTY 下用逐行输出替代 TUI 进度条，
+            # 避免构建进度被缓冲成"长时间无输出"。
             docker buildx build \
+              --progress=plain \
               --platform ${PLATFORMS} \
               -t ${IMAGE}:latest \
               $CACHE_ARGS \
               --cache-to type=inline \
-              --push .
+              --push . 2>&1
 
         # 直接从刚推送的多架构镜像里取出二进制：
         # 避免为导出二进制再做一轮 QEMU 编译（那是 3 次额外全量编译）
         - name: 导出各架构二进制
+          timeout: 20m
           script: |
-            set -e
+            set -eu
             rm -rf dist && mkdir -p dist
             extract() {
               platform="$1"; out="$2"; name="ck-extract-$$-$2"
@@ -87,31 +144,39 @@ main:
             extract linux/amd64  cloudkeep-linux-amd64
             extract linux/arm64  cloudkeep-linux-arm64
 
-        # Windows 无法在 Linux 容器里原生编译，改用 Alpine 提供的 mingw-w64 交叉工具链。
-        # 做成「失败不致命」：CNB 只能跑 Linux，交叉编译若环境有变也不该拖垮镜像与 Release。
+        # Windows 无法在 Linux 容器里原生编译，用 Alpine 的 mingw-w64 交叉工具链。
+        # 直接在流水线容器里编译（本身就是 rust:1-alpine），不再嵌套 docker run。
+        # 做成「失败不致命」：交叉编译若环境有变也不该拖垮镜像与 Release。
         - name: 交叉编译 Windows 二进制
+          timeout: 45m
           script: |
             set +e
-            docker run --rm -v "$PWD:/w" -w /w rust:1-alpine sh -eu -c '
-              apk add --no-cache build-base mingw-w64-gcc >/dev/null 2>&1
-              rustup target add x86_64-pc-windows-gnu >/dev/null 2>&1
-              export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
-              cargo build --release --locked --target x86_64-pc-windows-gnu
-              cp target/x86_64-pc-windows-gnu/release/cloudkeep.exe \
-                 dist/cloudkeep-windows-amd64.exe
-            '
+            ( while :; do sleep 20; echo "[heartbeat] Windows 交叉编译进行中..."; done ) &
+            HB=$!
+            trap 'kill $HB 2>/dev/null || true' EXIT
+
+            echo "==> 安装 mingw 工具链"
+            apk add --no-cache build-base mingw-w64-gcc 2>&1 | tail -20
+            rustup target add x86_64-pc-windows-gnu 2>&1 | tail -5
+
+            export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc
+            cargo build --release --locked --target x86_64-pc-windows-gnu 2>&1
+
             if [ $? -ne 0 ]; then
               echo "!! Windows 交叉编译失败，本次不产出该产物（不影响镜像与其它产物）"
             else
+              cp target/x86_64-pc-windows-gnu/release/cloudkeep.exe \
+                 dist/cloudkeep-windows-amd64.exe
               echo "==> Windows 产物已生成"
             fi
+            kill $HB 2>/dev/null || true
             chmod -R a+r dist 2>/dev/null || true
             ls -lh dist/ || true
             exit 0
 
         - name: 校验产物
           script: |
-            set -e
+            set -eu
             find dist -type f -print -exec ls -lh {} \;
             count=$(find dist -type f -name 'cloudkeep-*' | wc -l)
             echo "产物数量: $count"
@@ -121,8 +186,9 @@ main:
 
         # 在干净的 alpine 里直接运行产物，证明它是自包含的静态二进制
         - name: 验证可脱离构建环境运行
+          timeout: 20m
           script: |
-            set -e
+            set -eu
             chmod +x dist/cloudkeep-linux-amd64
             docker run --rm -v "$PWD/dist/cloudkeep-linux-amd64:/mnt/cloudkeep:ro" \
               alpine:3.21 /mnt/cloudkeep --version
@@ -133,11 +199,12 @@ main:
         # 需要具备 repo-release:rw 权限的令牌；在仓库环境变量里设 RELEASE_TOKEN，
         # 未配置时本步骤只告警并跳过（不会影响镜像发布）。
         - name: 发布 Release 二进制
+          timeout: 20m
           script: |
             set +e
-            # 尽力准备一个 JSON 解析器（不同任务镜像包管理器不同，失败也无妨）
-            command -v jq >/dev/null 2>&1 || \
-              { apk add --no-cache jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || true; }
+            # curl / jq 已在「准备构建环境」步骤装好；这里再兜底一次
+            command -v curl >/dev/null 2>&1 || apk add --no-cache curl
+            command -v jq   >/dev/null 2>&1 || apk add --no-cache jq
 
             TOKEN="${RELEASE_TOKEN:-${CNB_TOKEN:-}}" \
             TARGET_SHA="${CNB_COMMIT:-}" \
