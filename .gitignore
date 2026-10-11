@@ -7,3 +7,8 @@ data/
 .Trash-0/
 # 编辑器/工具原子写入留下的临时目录
 *.tmpdir/
+
+# CloudKeep-Server：本地开发的服务端，暂不纳入本仓库（保持本地部署）
+# 若将来要开源它，删除下面两行即可让它重新被 git 跟踪
+/CloudKeep-Server/
+/scripts/smoke-server.ps1
