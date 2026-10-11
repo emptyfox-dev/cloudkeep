@@ -1,0 +1,104 @@
+main:
+  push:
+    # 一次构建完成两件事：推送多架构镜像 + 导出各架构单文件二进制
+    # 平台原生支持 buildx 多架构（QEMU 已内置，无需 binfmt 配置）
+    - name: build-and-publish
+      services:
+        - docker
+      env:
+        IMAGE: ${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}
+        # 仅保留 Rust 官方镜像确实提供工具链的架构：
+        # rust:1-alpine 没有 linux/arm/v7（32 位 ARM）与 linux/386 的 manifest，
+        # 一旦列进去，buildx 会以
+        # "no match for platform in manifest" 直接失败。
+        # 需要 armv7 时得改用其它基础镜像，不能用同一个 buildx 构建同时覆盖。
+        PLATFORMS: linux/amd64,linux/arm64
+      stages:
+        - name: 登录制品库
+          script: docker login -u ${CNB_TOKEN_USER_NAME} -p "${CNB_TOKEN}" ${CNB_DOCKER_REGISTRY}
+
+        # 把基础镜像支持的平台打进日志：
+        # 一旦出现 "no match for platform in manifest"，可直接对照这里确认
+        # 到底是哪个架构不被支持，不必反复试错
+        - name: 诊断基础镜像平台
+          script: |
+            set -e
+            for img in rust:1-alpine alpine:3.21; do
+              echo "===== $img ====="
+              docker buildx imagetools inspect "$img" 2>&1 | sed -n '1,40p' || true
+            done
+            echo "===== builder 信息 ====="
+            docker buildx ls || true
+
+        - name: 多架构构建并推送
+          script: |
+            set -e
+            # 首次构建时 ${IMAGE}:latest 并不存在；部分 buildx 版本在
+            # --cache-from 指向不存在的镜像时会直接报错，形成
+            # 「镜像不存在 -> 构建失败 -> 镜像永远不会存在」的死锁。
+            # 因此先探测，命中才加缓存参数（缓存只影响速度，不影响正确性）。
+            CACHE_ARGS=""
+            if docker buildx imagetools inspect "${IMAGE}:latest" >/dev/null 2>&1; then
+              echo "==> 命中已有镜像，启用 registry 缓存"
+              CACHE_ARGS="--cache-from type=registry,ref=${IMAGE}:latest"
+            else
+              echo "==> 首次构建，跳过 cache-from"
+            fi
+
+            docker buildx build \
+              --platform ${PLATFORMS} \
+              -t ${IMAGE}:latest \
+              $CACHE_ARGS \
+              --cache-to type=inline \
+              --push .
+
+        # 直接从刚推送的多架构镜像里取出二进制：
+        # 避免为导出二进制再做一轮 QEMU 编译（那是 3 次额外全量编译）
+        - name: 导出各架构二进制
+          script: |
+            set -e
+            rm -rf dist && mkdir -p dist
+            extract() {
+              platform="$1"; out="$2"; name="ck-extract-$$-$2"
+              echo "==> $platform -> dist/$out"
+              docker rm -f "$name" >/dev/null 2>&1 || true
+              docker create --platform "$platform" --name "$name" "${IMAGE}:latest" >/dev/null
+              docker cp "$name:/usr/local/bin/cloudkeep" "dist/$out"
+              docker rm -f "$name" >/dev/null
+            }
+            extract linux/amd64  cloudkeep-linux-amd64
+            extract linux/arm64  cloudkeep-linux-arm64
+
+        - name: 校验产物
+          script: |
+            set -e
+            find dist -type f -print -exec ls -lh {} \;
+            count=$(find dist -type f | wc -l)
+            echo "产物数量: $count"
+            test "$count" -ge 2
+
+        # 在干净的 alpine 里直接运行产物，证明它是自包含的静态二进制
+        - name: 验证可脱离构建环境运行
+          script: |
+            set -e
+            chmod +x dist/cloudkeep-linux-amd64
+            docker run --rm -v "$PWD/dist/cloudkeep-linux-amd64:/mnt/cloudkeep:ro" \
+              alpine:3.21 /mnt/cloudkeep --version
+            docker run --rm -v "$PWD/dist/cloudkeep-linux-amd64:/mnt/cloudkeep:ro" \
+              alpine:3.21 /mnt/cloudkeep help > /dev/null
+
+        # 把二进制发布到 Release，供裸机直接下载。
+        # 需要具备 repo-release:rw 权限的令牌；在仓库环境变量里设 RELEASE_TOKEN，
+        # 未配置时本步骤只告警并跳过（不会影响镜像发布）。
+        - name: 发布 Release 二进制
+          script: |
+            set +e
+            # 尽力准备一个 JSON 解析器（不同任务镜像包管理器不同，失败也无妨）
+            command -v jq >/dev/null 2>&1 || \
+              { apk add --no-cache jq >/dev/null 2>&1 || apt-get install -y jq >/dev/null 2>&1 || true; }
+
+            TOKEN="${RELEASE_TOKEN:-${CNB_TOKEN:-}}" \
+            TARGET_SHA="${CNB_COMMIT:-}" \
+            sh scripts/publish-release.sh dist
+            echo "[release] 步骤结束（发布失败不影响镜像）"
+            exit 0

@@ -1,0 +1,9 @@
+/target
+/dist
+.env
+config/
+data/
+*.log
+.Trash-0/
+# 编辑器/工具原子写入留下的临时目录
+*.tmpdir/

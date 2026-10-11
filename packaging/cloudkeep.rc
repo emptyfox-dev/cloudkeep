@@ -1,0 +1,50 @@
+#!/bin/sh
+#
+# FreeBSD rc.d 脚本：把 CloudKeep 作为系统服务常驻。
+#
+# 安装：
+#   cp packaging/cloudkeep /usr/local/etc/rc.d/cloudkeep
+#   chmod 555 /usr/local/etc/rc.d/cloudkeep
+#   sysrc cloudkeep_enable=YES
+#   service cloudkeep start
+#
+# 配置放在 /usr/local/etc/cloudkeep.env，授权文件在 $HOME/.cloudkeep/config.json。
+
+# PROVIDE: cloudkeep
+# REQUIRE: NETWORKING
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name="cloudkeep"
+rcvar="cloudkeep_enable"
+
+: ${cloudkeep_enable:="NO"}
+: ${cloudkeep_user:="cloudkeep"}
+: ${cloudkeep_home:="/var/db/cloudkeep"}
+: ${cloudkeep_envfile:="/usr/local/etc/cloudkeep.env"}
+: ${cloudkeep_workdir:="${cloudkeep_home}/tmp"}
+
+pidfile="/var/run/${name}.pid"
+command="/usr/sbin/daemon"
+# daemon(8) 负责后台化、写 pidfile，并在停止时把信号转发给子进程
+procname="/usr/local/bin/cloudkeep"
+command_args="-p ${pidfile} -f -T ${name} -t ${name} \
+  /usr/bin/env HOME=${cloudkeep_home} WORK_DIR=${cloudkeep_workdir} ${procname} run"
+
+start_precmd="cloudkeep_precmd"
+
+cloudkeep_precmd()
+{
+    if [ -f "${cloudkeep_envfile}" ]; then
+        set -a
+        . "${cloudkeep_envfile}"
+        set +a
+    fi
+
+    mkdir -p "${cloudkeep_home}" "${cloudkeep_workdir}"
+    chown -R "${cloudkeep_user}" "${cloudkeep_home}"
+}
+
+load_rc_config $name
+run_rc_command "$1"

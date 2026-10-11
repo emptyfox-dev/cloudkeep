@@ -1,0 +1,36 @@
+[Unit]
+Description=CloudKeep - 百度网盘定时备份服务
+Documentation=https://cnb.cool/Emptyfox-Network/CloudKeep
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 按实际安装位置与用户调整
+ExecStart=/usr/local/bin/cloudkeep run
+EnvironmentFile=-/etc/cloudkeep.env
+
+User=cloudkeep
+Group=cloudkeep
+WorkingDirectory=/var/lib/cloudkeep
+
+# 授权文件默认在 $HOME/.cloudkeep/config.json，因此 HOME 必须指向可写目录
+Environment=HOME=/var/lib/cloudkeep
+Environment=WORK_DIR=/var/lib/cloudkeep/tmp
+
+Restart=on-failure
+RestartSec=10
+
+# 收到停止信号后等待当前备份结束（大文件场景可调大）
+TimeoutStopSec=600
+KillSignal=SIGTERM
+
+# 轻量加固
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/var/lib/cloudkeep
+
+[Install]
+WantedBy=multi-user.target

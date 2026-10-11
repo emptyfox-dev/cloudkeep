@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS launchd 配置：定时备份常驻进程。
+
+  安装（按实际路径与用户名调整）：
+    cp packaging/cloudkeep.plist ~/Library/LaunchAgents/com.cloudkeep.plist
+    launchctl load  ~/Library/LaunchAgents/com.cloudkeep.plist
+    launchctl start com.cloudkeep
+  查看日志：
+    tail -f /usr/local/var/log/cloudkeep.log
+  卸载：
+    launchctl unload ~/Library/LaunchAgents/com.cloudkeep.plist
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.cloudkeep</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/cloudkeep</string>
+        <string>run</string>
+    </array>
+
+    <!-- 配置项通过 .env 注入；也可改用下面的 EnvironmentVariables -->
+    <key>WorkingDirectory</key>
+    <string>/usr/local/var/cloudkeep</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>WORK_DIR</key>
+        <string>/usr/local/var/cloudkeep/tmp</string>
+        <key>TZ</key>
+        <string>Asia/Shanghai</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/usr/local/var/log/cloudkeep.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/var/log/cloudkeep.err.log</string>
+
+    <!-- 与 systemd 的 TimeoutStopSec 对应：给当前备份留足时间 -->
+    <key>ExitTimeOut</key>
+    <integer>600</integer>
+</dict>
+</plist>

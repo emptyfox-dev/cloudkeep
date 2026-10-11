@@ -1,0 +1,39 @@
+services:
+  cloudkeep:
+    # 默认使用公共多架构制品（含 linux/amd64、linux/arm64，pull 时按设备架构自动选择）
+    # 本地构建或自有仓库：在 .env 中设置 IMAGE_REPO
+    image: ${IMAGE_REPO:-docker.cnb.cool/emptyfox-network/cloudkeep:latest}
+    build:
+      context: .
+      # 国内构建可解开注释，用 crates.io 镜像加速依赖下载
+      # args:
+      #   CARGO_MIRROR: sparse+https://rsproxy.cn/index/
+    container_name: cloudkeep
+    restart: unless-stopped
+    # init 进程转发停止信号并回收子进程
+    init: true
+    env_file:
+      - .env
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+    # 根文件系统只读；可写仅 /tmp 与挂载卷。备份包可能很大，/tmp 用磁盘卷而非 tmpfs，避免占满内存
+    read_only: true
+    volumes:
+      # 授权信息（Token）：首次授权后持久化，token 过期会自动刷新并写回
+      - ./config:/home/cloudkeep/.cloudkeep
+      # 被备份的数据：只读挂载到容器内 /data（需与 BACKUP_SOURCE 保持一致）
+      - ${BACKUP_HOST_DIR:-./data}:/data:ro
+      # 打包临时目录（WORK_DIR 默认 /tmp/cloudkeep）
+      - cloudkeep-tmp:/tmp
+      # 如需备份多个目录，按需追加并同步修改 BACKUP_SOURCE，例如：
+      # - /var/lib/docker/volumes:/data/docker-volumes:ro
+    # 收到停止信号后等待当前备份完成（可按最大备份耗时调整）
+    stop_grace_period: 10m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  cloudkeep-tmp:

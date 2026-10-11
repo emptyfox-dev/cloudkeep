@@ -1,0 +1,60 @@
+[package]
+name = "cloudkeep"
+version = "1.0.0"
+edition = "2024"
+# 使用了 let chains（`if let ... && ...`），需要 1.88+
+rust-version = "1.88"
+description = "百度网盘定时备份服务：Rust 原生实现，支持二进制直接运行与 Docker 部署"
+license = "MIT"
+publish = false
+
+[lib]
+name = "cloudkeep"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cloudkeep"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+chrono-tz = "0.10"
+clap = { version = "4", features = ["derive"] }
+dotenvy = "0.15"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+futures = "0.3"
+hex = "0.4"
+md5 = "0.7"
+regex = "1"
+reqwest = { version = "0.13", default-features = false, features = [
+  "json",
+  "multipart",
+  "form",
+  "stream",
+  "charset",
+  "rustls-no-provider",
+  "system-proxy",
+  "http2",
+  "query",
+] }
+# 选用 ring 作为 rustls 的加密后端：纯 C/汇编，无需 cmake/clang，
+# 在 alpine + musl 的多架构构建里最省事（aws-lc-rs 需要 cmake 工具链）
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tar = { version = "0.4", default-features = false }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "fs", "sync", "time"] }
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"
+filetime = "0.2"
+
+# 产出尽量小的静态二进制，便于 alpine 镜像与直接分发
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

@@ -1,0 +1,8 @@
+/target
+/dist
+config
+data
+.env
+.git
+.gitignore
+*.md

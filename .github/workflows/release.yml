@@ -1,0 +1,128 @@
+name: release
+
+# 多平台构建：产出 Windows / macOS / FreeBSD / Linux 的单文件二进制。
+#
+# 说明：CNB（cnb.cool）只能跑 Linux 容器，无法产出 macOS 与 FreeBSD 二进制，
+# 因此这份工作流面向 GitHub（若仓库仅托管在 CNB，可忽略本文件）。
+# 需要 macOS 二进制时必须在 macOS runner 上构建：交叉编译需要 Apple SDK。
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-amd64
+            runner: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+          - name: linux-arm64
+            runner: ubuntu-latest
+            target: aarch64-unknown-linux-musl
+            cross: true
+          - name: windows-amd64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - name: macos-amd64
+            runner: macos-13
+            target: x86_64-apple-darwin
+          - name: macos-arm64
+            runner: macos-14
+            target: aarch64-apple-darwin
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # musl 目标需要 musl 链接器（仅 amd64 走本机即可）
+      - name: 安装 musl 工具链
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      # arm64 musl 交叉编译用 cross（自带 sysroot 与链接器）
+      - name: 安装 cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: 构建
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --locked --target ${{ matrix.target }}
+          else
+            cargo build --release --locked --target ${{ matrix.target }}
+          fi
+
+      - name: 打包
+        shell: bash
+        run: |
+          set -e
+          bin="cloudkeep"
+          [ "${{ runner.os }}" = "Windows" ] && bin="cloudkeep.exe"
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release/$bin" "dist/"
+          cd dist
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            7z a "../cloudkeep-${{ matrix.name }}.zip" "$bin"
+          else
+            tar czf "../cloudkeep-${{ matrix.name }}.tar.gz" "$bin"
+          fi
+          cd ..
+          ls -lh cloudkeep-${{ matrix.name }}.*
+
+      - name: 验证二进制可运行
+        shell: bash
+        run: |
+          set -e
+          bin="dist/cloudkeep"
+          [ "${{ runner.os }}" = "Windows" ] && bin="dist/cloudkeep.exe"
+          "$bin" --version
+          "$bin" help > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloudkeep-${{ matrix.name }}
+          path: cloudkeep-${{ matrix.name }}.*
+          if-no-files-found: error
+
+  # FreeBSD 没有官方 hosted runner，用虚拟机跑
+  freebsd:
+    name: freebsd-amd64
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 在 FreeBSD 中构建
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: |
+            pkg install -y curl
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          run: |
+            set -e
+            . "$HOME/.cargo/env"
+            cargo build --release --locked
+            ./target/release/cloudkeep --version
+            ./target/release/cloudkeep help > /dev/null
+            mkdir -p dist && cp target/release/cloudkeep dist/
+            tar czf cloudkeep-freebsd-amd64.tar.gz -C dist cloudkeep
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cloudkeep-freebsd-amd64
+          path: cloudkeep-freebsd-amd64.tar.gz
+          if-no-files-found: error
