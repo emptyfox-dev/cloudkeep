@@ -460,6 +460,28 @@ cargo build --release           # 发布构建（LTO + strip，约 5 MB）
 
 `Cargo.lock` 已提交，镜像构建使用 `--locked` 保证可复现。
 
+## 许可
+
+本项目（CloudKeep 备份客户端）以 **MIT 协议**开源，可自由使用、修改与分发，
+详见 [LICENSE](LICENSE)。
+
+```
+MIT License
+Copyright (c) 2026 Emptyfox Network
+```
+
+> ⚠️ **CloudKeep-Server（授权中转服务端）是独立的闭源组件，不在本开源协议的覆盖范围内。**
+>
+> 本仓库只包含备份客户端。服务端为 Emptyfox Network 的专有软件，
+> **保留所有权利**，未经书面授权不得使用、复制、修改或分发。
+> 两者是彼此独立的 Cargo 项目，不存在子模块或工作区关系。
+>
+> 因此：本仓库的 MIT 协议**仅**适用于备份客户端自身；从本仓库获取代码
+> 不代表获得服务端的任何授权。
+
+本仓库构建时依赖的第三方开源组件（`reqwest`、`tokio`、`tar`、`flate2`、
+`rustls` 等）各自适用其原有许可。
+
 ## 故障排查
 
 | 现象 | 原因与处理 |
