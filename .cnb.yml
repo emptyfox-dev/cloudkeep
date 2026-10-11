@@ -13,9 +13,35 @@ main:
         # "no match for platform in manifest" 直接失败。
         # 需要 armv7 时得改用其它基础镜像，不能用同一个 buildx 构建同时覆盖。
         PLATFORMS: linux/amd64,linux/arm64
+        # 编译期内置到二进制里的服务端地址（见 build.rs）。
+        # 在仓库环境变量里覆盖它即可，无需改代码。
+        DEFAULT_SERVER_URL: ${CLOUDKEEP_DEFAULT_SERVER_URL:-http://127.0.0.1:49494}
       stages:
         - name: 登录制品库
           script: docker login -u ${CNB_TOKEN_USER_NAME} -p "${CNB_TOKEN}" ${CNB_DOCKER_REGISTRY}
+
+        # 先跑测试与静态检查：镜像是要分发的制品，测试不过就不该产出
+        - name: 单元测试
+          script: |
+            set -e
+            # 传一个占位地址即可，测试不依赖真实服务端
+            docker run --rm -v "$PWD:/w" -w /w \
+              -e CLOUDKEEP_DEFAULT_SERVER_URL="http://127.0.0.1:49494" \
+              rust:1-alpine sh -eu -c '
+                apk add --no-cache build-base perl >/dev/null 2>&1
+                cargo test --locked
+              '
+
+        - name: 静态检查
+          script: |
+            set -e
+            docker run --rm -v "$PWD:/w" -w /w \
+              -e CLOUDKEEP_DEFAULT_SERVER_URL="http://127.0.0.1:49494" \
+              rust:1-alpine sh -eu -c '
+                apk add --no-cache build-base perl >/dev/null 2>&1
+                rustup component add clippy >/dev/null 2>&1
+                cargo clippy --all-targets --locked -- -D warnings
+              '
 
         # 把基础镜像支持的平台打进日志：
         # 一旦出现 "no match for platform in manifest"，可直接对照这里确认
@@ -48,6 +74,7 @@ main:
             docker buildx build \
               --platform ${PLATFORMS} \
               -t ${IMAGE}:latest \
+              --build-arg CLOUDKEEP_DEFAULT_SERVER_URL="${DEFAULT_SERVER_URL}" \
               $CACHE_ARGS \
               --cache-to type=inline \
               --push .
@@ -74,7 +101,9 @@ main:
         - name: 交叉编译 Windows 二进制
           script: |
             set +e
-            docker run --rm -v "$PWD:/w" -w /w rust:1-alpine sh -eu -c '
+            docker run --rm -v "$PWD:/w" -w /w \
+              -e CLOUDKEEP_DEFAULT_SERVER_URL="${DEFAULT_SERVER_URL}" \
+              rust:1-alpine sh -eu -c '
               apk add --no-cache build-base mingw-w64-gcc >/dev/null 2>&1
               rustup target add x86_64-pc-windows-gnu >/dev/null 2>&1
               export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER=x86_64-w64-mingw32-gcc

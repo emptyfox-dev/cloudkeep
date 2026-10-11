@@ -29,6 +29,15 @@ pub struct CliConfig {
     pub secret_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<i64>,
+    /// CloudKeep-Server 的租户 API Key（走服务端时使用）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_api_key: Option<String>,
+    /// 该 API Key 所属的服务端地址（便于识别它属于哪个部署）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_url: Option<String>,
+    /// 服务端返回的租户 ID（仅用于日志与排查）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server_tenant_id: Option<String>,
 }
 
 /// 授权文件所在目录，可用 `CLOUDKEEP_CONFIG_DIR` 覆盖。
@@ -82,6 +91,7 @@ pub fn save_cli_config_to(path: &Path, updates: &CliConfig) -> Result<()> {
         };
     }
     merge!(access_token, refresh_token, app_key, secret_key, expires_at);
+    merge!(server_api_key, server_url, server_tenant_id);
 
     let text = serde_json::to_string_pretty(&merged).context("序列化授权文件失败")?;
     std::fs::write(path, text)
@@ -185,7 +195,19 @@ struct TokenResponse {
 }
 
 /// 用 refresh_token 换新 token，并写回授权文件（refresh_token 会轮换）。
+///
+/// 服务端模式下本函数不做事：刷新由服务端负责，客户端只需重新取一次 token
+/// （见 [`ensure_access_token`]）。这样上传/建目录等处的"过期则刷新重试"逻辑
+/// 在两种模式下都能正确工作。
 pub async fn refresh_access_token(client: &reqwest::Client) -> Result<Option<String>> {
+    if matches!(
+        crate::server::resolve_mode(),
+        crate::server::AuthMode::Server { .. }
+    ) {
+        let token = crate::server::ensure_token_via_server(client).await?;
+        return Ok(Some(token));
+    }
+
     let Some(refresh_token) = get_refresh_token() else {
         return Ok(None);
     };
@@ -245,14 +267,27 @@ pub async fn refresh_access_token(client: &reqwest::Client) -> Result<Option<Str
 }
 
 /// 确保有可用的 Access Token：必要时先刷新。
+///
+/// **两条授权路径在此汇合**：
+/// - 配了自定义百度凭证（`BAIDU_APP_KEY` + `BAIDU_SECRET_KEY`）→ 直连百度刷新（原有行为）；
+/// - 未配自定义凭证 → 通过 CloudKeep-Server 取 token（服务端代管应用凭证）。
 pub async fn ensure_access_token(client: &reqwest::Client) -> Result<String> {
+    // 服务端模式：先把 token 同步下来（内部会按需自动创建租户）
+    if matches!(
+        crate::server::resolve_mode(),
+        crate::server::AuthMode::Server { .. }
+    ) {
+        return crate::server::ensure_token_via_server(client).await;
+    }
+
     if let Some(token) = get_access_token() {
         return Ok(token);
     }
     match refresh_access_token(client).await? {
         Some(token) => Ok(token),
         None => bail!(
-            "未找到 Access Token，请先执行授权: cloudkeep auth-url && cloudkeep auth-code <code>"
+            "未找到 Access Token，请先执行授权: cloudkeep auth-url && cloudkeep auth-code <code>\n\
+             或配置 CloudKeep-Server（CLOUDKEEP_SERVER_URL + CLOUDKEEP_SERVER_API_KEY）"
         ),
     }
 }

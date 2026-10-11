@@ -1,13 +1,12 @@
 services:
   cloudkeep:
-    # 默认使用公共多架构制品（含 linux/amd64、linux/arm64，pull 时按设备架构自动选择）
-    # 本地构建或自有仓库：在 .env 中设置 IMAGE_REPO
+    # 镜像来自 CNB 云构建（.cnb.yml 在 push 到 main 时自动构建并推送多架构镜像
+    # linux/amd64 + linux/arm64，pull 时按设备架构自动选择；公共制品，无需登录）。
+    #
+    # 这里刻意不写 build: —— 默认路径统一走云制品，
+    # 保证「本地跑的」与「云端发的」是同一个制品。
+    # 需要本地构建时见 README「镜像与云端构建」的 docker buildx 命令。
     image: ${IMAGE_REPO:-docker.cnb.cool/emptyfox-network/cloudkeep:latest}
-    build:
-      context: .
-      # 国内构建可解开注释，用 crates.io 镜像加速依赖下载
-      # args:
-      #   CARGO_MIRROR: sparse+https://rsproxy.cn/index/
     container_name: cloudkeep
     restart: unless-stopped
     # init 进程转发停止信号并回收子进程

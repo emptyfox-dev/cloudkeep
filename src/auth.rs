@@ -95,6 +95,7 @@ pub async fn login_with_code(client: &reqwest::Client, code: &str) -> Result<Log
         app_key: Some(app_key),
         secret_key: Some(secret_key),
         expires_at: Some(expires_at),
+        ..Default::default()
     })?;
 
     Ok(LoginResult { expires_at, config_file: config_file() })

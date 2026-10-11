@@ -15,6 +15,7 @@ pub mod http;
 pub mod logger;
 pub mod remote;
 pub mod scheduler;
+pub mod server;
 pub mod token;
 pub mod upload;
 

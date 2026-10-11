@@ -110,17 +110,7 @@ impl Cli {
 
             Command::AuthUrl | Command::Auth => {
                 // 授权命令不要求 BACKUP_SOURCE 等备份配置
-                match build_auth_url("oob") {
-                    Ok(url) => {
-                        println!("① 在浏览器打开下面的链接，登录百度账号并授权：\n   {url}\n");
-                        println!("② 授权后页面会显示 code，执行：\n   cloudkeep auth-code <code>");
-                        Ok(0)
-                    }
-                    Err(err) => {
-                        log_err!("生成授权链接失败: {err:#}");
-                        Ok(1)
-                    }
-                }
+                auth_url(&http).await
             }
 
             Command::AuthCode { code } => {
@@ -128,22 +118,7 @@ impl Cli {
                     .or_else(|| std::env::var("BAIDU_AUTH_CODE").ok())
                     .unwrap_or_default();
 
-                match login_with_code(&http, &code).await {
-                    Ok(result) => {
-                        log_info!("授权成功，Token 已保存到 {}", result.config_file.display());
-                        let expires_at = chrono::DateTime::from_timestamp_millis(result.expires_at)
-                            .unwrap_or_else(chrono::Utc::now);
-                        log_info!(
-                            "Access Token 有效期至 {}（过期后会自动刷新）",
-                            expires_at.to_rfc3339()
-                        );
-                        Ok(0)
-                    }
-                    Err(err) => {
-                        log_err!("授权失败: {err:#}");
-                        Ok(1)
-                    }
-                }
+                auth_code(&http, &code).await
             }
 
             Command::Backup { dry_run } => match do_backup(&http, dry_run).await {
@@ -211,6 +186,110 @@ async fn do_backup(http: &Client, dry_run: bool) -> Result<()> {
     let client = PanClient::new(http.clone());
     run_backup(&client, &cfg, Some(dry_run)).await?;
     Ok(())
+}
+
+/// 授权第 1 步：打印授权链接。
+///
+/// 两种模式：
+/// - 自定义百度凭证 → 本地生成链接（原有行为）；
+/// - 服务端模式 → 向服务端索取链接，并把返回的 `state` 暂存下来，
+///   供 `auth-code` 第 2 步一起提交（服务端的 state 是一次性的，且绑定租户）。
+async fn auth_url(http: &Client) -> Result<i32> {
+    use crate::server::{self, AuthMode};
+
+    match server::resolve_mode() {
+        AuthMode::CustomBaiduCredentials { .. } => match build_auth_url("oob") {
+            Ok(url) => {
+                println!("① 在浏览器打开下面的链接，登录百度账号并授权：\n   {url}\n");
+                println!("② 授权后页面会显示 code，执行：\n   cloudkeep auth-code <code>");
+                Ok(0)
+            }
+            Err(err) => {
+                log_err!("生成授权链接失败: {err:#}");
+                Ok(1)
+            }
+        },
+        AuthMode::Server { base_url, api_key } => {
+            let result = async {
+                let api_key = server::ensure_api_key(http, &base_url, api_key).await?;
+                server::fetch_authorize_url(http, &base_url, &api_key).await
+            }
+            .await;
+
+            match result {
+                Ok(resp) => {
+                    // 暂存 state：服务端要求 exchange 时同时提交 code 与 state
+                    if let Err(e) = server::save_pending_state(&resp.state) {
+                        log_err!("保存授权 state 失败: {e:#}");
+                        return Ok(1);
+                    }
+                    println!("① 在浏览器打开下面的链接，登录百度账号并授权：\n   {}\n", resp.url);
+                    println!("② 授权后页面会显示 code，执行：\n   cloudkeep auth-code <code>");
+                    println!("   （state 已自动保存，无需手动填写）");
+                    Ok(0)
+                }
+                Err(err) => {
+                    log_err!("生成授权链接失败: {err:#}");
+                    Ok(1)
+                }
+            }
+        }
+    }
+}
+
+/// 授权第 2 步：用 code 换 token。
+async fn auth_code(http: &Client, code: &str) -> Result<i32> {
+    use crate::server::{self, AuthMode};
+
+    match server::resolve_mode() {
+        AuthMode::CustomBaiduCredentials { .. } => match login_with_code(http, code).await {
+            Ok(result) => {
+                log_info!("授权成功，Token 已保存到 {}", result.config_file.display());
+                let expires_at = chrono::DateTime::from_timestamp_millis(result.expires_at)
+                    .unwrap_or_else(chrono::Utc::now);
+                log_info!(
+                    "Access Token 有效期至 {}（过期后会自动刷新）",
+                    expires_at.to_rfc3339()
+                );
+                Ok(0)
+            }
+            Err(err) => {
+                log_err!("授权失败: {err:#}");
+                Ok(1)
+            }
+        },
+        AuthMode::Server { base_url, api_key } => {
+            let Some(state) = server::load_pending_state() else {
+                log_err!(
+                    "本地没有待用的授权 state。请先执行 `cloudkeep auth-url` 获取授权链接\
+                     （state 与链接是配套的，且有时效）"
+                );
+                return Ok(1);
+            };
+
+            let api_key = match server::ensure_api_key(http, &base_url, api_key).await {
+                Ok(k) => k,
+                Err(err) => {
+                    log_err!("获取 API Key 失败: {err:#}");
+                    return Ok(1);
+                }
+            };
+
+            match server::exchange_code(http, &base_url, &api_key, code, &state).await {
+                Ok(()) => {
+                    // state 已被服务端消费，本地副本即可清掉
+                    let _ = server::clear_pending_state();
+                    log_info!("授权成功：服务端已保存该租户的百度授权");
+                    log_info!("之后备份会自动取用 token，过期由服务端刷新");
+                    Ok(0)
+                }
+                Err(err) => {
+                    log_err!("授权失败: {err:#}");
+                    Ok(1)
+                }
+            }
+        }
+    }
 }
 
 /// 启动定时调度。

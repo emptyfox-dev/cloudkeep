@@ -293,14 +293,55 @@ cron 支持 `*`、列表 `a,b`、区间 `a-b`、步进 `*/n` 与 `a-b/n`，以�
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `BAIDU_APP_KEY` / `BAIDU_SECRET_KEY` | 空 | 开放平台应用凭证，仅授权时使用 |
-| `BAIDU_ACCESS_TOKEN` / `BAIDU_REFRESH_TOKEN` | 空 | 可选，直接提供 token，优先级高于本地授权文件；过期自动刷新并在本次进程内生效并写回 `./config` |
+| `CLOUDKEEP_DEFAULT_SERVER_URL` | `http://127.0.0.1:49494` | **构建期**内置的服务端地址（由 `build.rs` 注入，运行时不读） |
+| `CLOUDKEEP_SERVER_URL` | 空 | 运行时覆盖内置的服务端地址 |
+| `CLOUDKEEP_SERVER_API_KEY` | 空 | 运行时显式提供 API Key（否则读授权文件，没有则自动申请） |
+| `BAIDU_APP_KEY` / `BAIDU_SECRET_KEY` | 空 | **可选**。填了就优先直连百度、不使用服务端；留空则走服务端 |
+| `BAIDU_ACCESS_TOKEN` / `BAIDU_REFRESH_TOKEN` | 空 | 可选，直接提供 token，优先级高于本地授权文件 |
 | `WORK_DIR` | `/tmp/cloudkeep` | 临时目录（必须是绝对路径），压缩包上传成功后自动删除 |
 | `DRY_RUN` | `false` | 只打包不上传 |
 | `HEALTHCHECK_MAX_AGE_HOURS` | `26` | 心跳新鲜度阈值（小时），超过则容器标记为 unhealthy；建议略大于 `CRON_SCHEDULE` 间隔 |
 | `TZ` | `Asia/Shanghai` | 容器时区 |
 | `CLOUDKEEP_CONFIG_DIR` | `$HOME/.cloudkeep` | 可选，覆盖授权文件目录 |
 | `IMAGE_REPO` | 见 `.env.example` | 部署使用的镜像地址 |
+
+## 授权方式
+
+支持两条路径，**自定义百度凭证优先**：
+
+### 方式 A · 通过 CloudKeep-Server（默认，无需填百度凭证）
+
+主程序内置了服务端地址。首次授权时会**自动申请一个属于你自己的租户**，
+API Key 保存在 `$HOME/.cloudkeep/config.json`；之后 token 由服务端取用与刷新。
+
+```bash
+cloudkeep auth-url          # ① 输出授权链接（若本地无 API Key 会先自动申请）
+# 浏览器打开链接、授权，复制页面上的 code
+cloudkeep auth-code <code>  # ② 完成授权（state 已自动保存，无需手填）
+cloudkeep run               # ③ 启动定时备份
+```
+
+每个使用者拿到的是**自己的**租户，对应**自己的**百度账号授权，彼此隔离。
+
+指向自建服务端：
+
+```bash
+export CLOUDKEEP_SERVER_URL=https://ck.example.com
+```
+
+### 方式 B · 自定义百度应用凭证（完全保留手动填写）
+
+配置下面两项后，客户端**优先直连百度**，完全不经过服务端：
+
+```bash
+export BAIDU_APP_KEY=你的AppKey
+export BAIDU_SECRET_KEY=你的SecretKey
+```
+
+授权流程与旧版完全一致（`auth-url` → `auth-code`），token 保存在本地并自动刷新。
+
+> **优先级**：`BAIDU_APP_KEY` + `BAIDU_SECRET_KEY` 都已配置 → 方式 B；
+> 否则 → 方式 A。两条路径互不干扰，老用户升级后行为不变。
 
 ## 自定义备份路径
 
@@ -402,11 +443,19 @@ docker rm ck
 ./cloudkeep --version
 ```
 
-**方式三：本地构建**
+**方式三：本地构建**（仅限开发调试，正式分发一律走云制品）
 
 ```bash
+# 从源码直接产出二进制
 docker buildx build --target binary --output type=local,dest=dist .
+
+# 或用 compose 覆盖镜像地址，改为使用本地构建的镜像
+# IMAGE_REPO=cloudkeep:latest docker compose up -d
 ```
+
+> ℹ️ `docker-compose.yml` 里**没有 `build:` 段**：默认路径统一走 CNB 云制品，
+> 避免"以为在跑云端版本、实际跑了本地未发布代码"。要本地构建请显式执行上面的
+> `docker buildx` 命令。
 
 公共仓库，无需登录，任何环境直接拉取：
 
@@ -498,7 +547,7 @@ Copyright (c) 2026 Emptyfox Network
 | 网盘上找不到备份 | 应用只能访问自己的目录，`BACKUP_REMOTE_DIR` 是相对应用根目录的路径，且必须以 `/` 开头 |
 | 时区不对（文件名/调度时间偏差 8 小时） | 修正 `TZ` 与 `CRON_TIMEZONE` |
 | `WORK_DIR 必须是绝对路径` | `WORK_DIR` 需为绝对路径（默认 `/tmp/cloudkeep`） |
-| `docker compose up` 拉取镜像失败 | 国内网络可在宿主机配置 Docker 镜像加速；也可先 `docker compose build` 使用本地构建的镜像 |
+| `docker compose up` 拉取镜像失败 | 国内网络可在宿主机配置 Docker 镜像加速；或在 `.env` 里把 `IMAGE_REPO` 指向自有仓库/本地构建的镜像 |
 | 容器内权限报错 | 容器以 uid 1000 运行，挂载的宿主目录需对 uid 1000 可读 |
 | 容器状态显示 `unhealthy` | 心跳文件超过 `HEALTHCHECK_MAX_AGE_HOURS` 未刷新：调度进程异常或定时备份长时间未触发；查看日志并核对 `CRON_SCHEDULE`/时区 |
 | 收到停止信号后容器不退出 | 正在上传，属预期行为；`stop_grace_period` 为 10 分钟，可在大文件场景调大 |

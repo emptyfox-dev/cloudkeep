@@ -15,10 +15,16 @@ RUN apk add --no-cache build-base perl
 #   docker build --build-arg CARGO_MIRROR=sparse+https://rsproxy.cn/index/ .
 ARG CARGO_MIRROR=""
 
+# 内置到二进制里的服务端地址（构建期注入，见 build.rs）。
+# 分发镜像/二进制前请把它设成可公开访问的地址，否则使用者首次运行连不上。
+ARG CLOUDKEEP_DEFAULT_SERVER_URL="http://127.0.0.1:49494"
+
 WORKDIR /src
 
 # 先只拷清单，利用层缓存把依赖编译结果固化下来
-COPY Cargo.toml Cargo.lock ./
+# build.rs 必须一并拷入：Cargo.toml 声明了 build = "build.rs"，
+# 缺少它 cargo 会直接报错（"could not find build.rs"）。
+COPY Cargo.toml Cargo.lock build.rs ./
 
 # 用空壳源码预编译依赖，这样后续改业务代码时不必重编依赖
 RUN mkdir -p src \
