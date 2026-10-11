@@ -286,8 +286,10 @@ pub async fn ensure_access_token(client: &reqwest::Client) -> Result<String> {
     match refresh_access_token(client).await? {
         Some(token) => Ok(token),
         None => bail!(
-            "未找到 Access Token，请先执行授权: cloudkeep auth-url && cloudkeep auth-code <code>\n\
-             或配置 CloudKeep-Server（CLOUDKEEP_SERVER_URL + CLOUDKEEP_SERVER_API_KEY）"
+            "未找到 Access Token。请先执行授权：\n  \
+             cloudkeep auth-url        # ① 获取授权链接\n  \
+             cloudkeep auth-code <code>  # ② 用授权码换取 Token\n\
+             （默认通过 CloudKeep-Server 完成；若你配置了自定义百度应用凭证则直连百度）"
         ),
     }
 }

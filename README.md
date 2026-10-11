@@ -293,10 +293,7 @@ cron 支持 `*`、列表 `a,b`、区间 `a-b`、步进 `*/n` 与 `a-b/n`，以�
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
-| `CLOUDKEEP_DEFAULT_SERVER_URL` | `http://127.0.0.1:49494` | **构建期**内置的服务端地址（由 `build.rs` 注入，运行时不读） |
-| `CLOUDKEEP_SERVER_URL` | 空 | 运行时覆盖内置的服务端地址 |
-| `CLOUDKEEP_SERVER_API_KEY` | 空 | 运行时显式提供 API Key（否则读授权文件，没有则自动申请） |
-| `BAIDU_APP_KEY` / `BAIDU_SECRET_KEY` | 空 | **可选**。填了就优先直连百度、不使用服务端；留空则走服务端 |
+| `BAIDU_APP_KEY` / `BAIDU_SECRET_KEY` | 空 | **可选**。填了就直连百度（你自己的开发者应用）；留空则走官方服务端 |
 | `BAIDU_ACCESS_TOKEN` / `BAIDU_REFRESH_TOKEN` | 空 | 可选，直接提供 token，优先级高于本地授权文件 |
 | `WORK_DIR` | `/tmp/cloudkeep` | 临时目录（必须是绝对路径），压缩包上传成功后自动删除 |
 | `DRY_RUN` | `false` | 只打包不上传 |
@@ -305,13 +302,18 @@ cron 支持 `*`、列表 `a,b`、区间 `a-b`、步进 `*/n` 与 `a-b/n`，以�
 | `CLOUDKEEP_CONFIG_DIR` | `$HOME/.cloudkeep` | 可选，覆盖授权文件目录 |
 | `IMAGE_REPO` | 见 `.env.example` | 部署使用的镜像地址 |
 
+> 🔒 **服务端地址固定为 `https://cloudkeep.emptyfox.net`，不可配置。**
+> 它编译在二进制里，没有对应的环境变量或配置项——这可以避免使用者被诱导
+> 把请求（连同自己的租户 API Key）发往伪造的第三方服务。
+> 租户 API Key 由客户端首次运行时自动申请并保存在本地授权文件，**无需手工填写**。
+
 ## 授权方式
 
 支持两条路径，**自定义百度凭证优先**：
 
-### 方式 A · 通过 CloudKeep-Server（默认，无需填百度凭证）
+### 方式 A · 官方服务端（默认，无需填百度凭证）
 
-主程序内置了服务端地址。首次授权时会**自动申请一个属于你自己的租户**，
+客户端会自动向官方服务端申请一个**属于你自己的**租户，
 API Key 保存在 `$HOME/.cloudkeep/config.json`；之后 token 由服务端取用与刷新。
 
 ```bash
@@ -323,15 +325,10 @@ cloudkeep run               # ③ 启动定时备份
 
 每个使用者拿到的是**自己的**租户，对应**自己的**百度账号授权，彼此隔离。
 
-指向自建服务端：
+### 方式 B · 自定义百度开发者凭证（可自定义的只有这一项）
 
-```bash
-export CLOUDKEEP_SERVER_URL=https://ck.example.com
-```
-
-### 方式 B · 自定义百度应用凭证（完全保留手动填写）
-
-配置下面两项后，客户端**优先直连百度**，完全不经过服务端：
+如果你在百度开放平台有自己的应用，配置下面两项后客户端**直连百度**，
+完全不经过官方服务端：
 
 ```bash
 export BAIDU_APP_KEY=你的AppKey

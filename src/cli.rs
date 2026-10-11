@@ -209,10 +209,10 @@ async fn auth_url(http: &Client) -> Result<i32> {
                 Ok(1)
             }
         },
-        AuthMode::Server { base_url, api_key } => {
+        AuthMode::Server { api_key } => {
             let result = async {
-                let api_key = server::ensure_api_key(http, &base_url, api_key).await?;
-                server::fetch_authorize_url(http, &base_url, &api_key).await
+                let api_key = server::ensure_api_key(http, api_key).await?;
+                server::fetch_authorize_url(http, &api_key).await
             }
             .await;
 
@@ -258,7 +258,7 @@ async fn auth_code(http: &Client, code: &str) -> Result<i32> {
                 Ok(1)
             }
         },
-        AuthMode::Server { base_url, api_key } => {
+        AuthMode::Server { api_key } => {
             let Some(state) = server::load_pending_state() else {
                 log_err!(
                     "本地没有待用的授权 state。请先执行 `cloudkeep auth-url` 获取授权链接\
@@ -267,7 +267,7 @@ async fn auth_code(http: &Client, code: &str) -> Result<i32> {
                 return Ok(1);
             };
 
-            let api_key = match server::ensure_api_key(http, &base_url, api_key).await {
+            let api_key = match server::ensure_api_key(http, api_key).await {
                 Ok(k) => k,
                 Err(err) => {
                     log_err!("获取 API Key 失败: {err:#}");
@@ -275,7 +275,7 @@ async fn auth_code(http: &Client, code: &str) -> Result<i32> {
                 }
             };
 
-            match server::exchange_code(http, &base_url, &api_key, code, &state).await {
+            match server::exchange_code(http, &api_key, code, &state).await {
                 Ok(()) => {
                     // state 已被服务端消费，本地副本即可清掉
                     let _ = server::clear_pending_state();

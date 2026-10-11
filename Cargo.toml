@@ -8,8 +8,6 @@ description = "百度网盘定时备份服务：Rust 原生实现，支持二进
 # 主程序为 MIT 开源；服务端 CloudKeep-Server 是独立的闭源组件，不在本许可范围内
 license = "MIT"
 publish = false
-# 注入内置的服务端地址（见 build.rs 与 .env.example 的 CLOUDKEEP_DEFAULT_SERVER_URL）
-build = "build.rs"
 
 [lib]
 name = "cloudkeep"
